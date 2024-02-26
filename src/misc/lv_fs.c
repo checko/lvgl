@@ -81,25 +81,52 @@ lv_fs_res_t lv_fs_open(lv_fs_file_t * file_p, const char * path, lv_fs_mode_t mo
         return LV_FS_RES_NOT_IMP;
     }
 
-    const char * real_path = lv_fs_get_real_path(path);
-    void * file_d = drv->open_cb(drv, real_path, mode);
 
-    if(file_d == NULL || file_d == (void *)(-1)) {
-        return LV_FS_RES_UNKNOWN;
+    /* For memory-mapped files we set the file handle to our file descriptor so that we can access the cache from the file operations */
+    if(drv->cache_size == LV_FS_CACHE_FROM_BUFFER) {
+        file_p->file_d = file_p;
+    }
+    else {
+        const char * real_path = lv_fs_get_real_path(path);
+        void * file_d = drv->open_cb(drv, real_path, mode);
+        if(file_d == NULL || file_d == (void *)(-1)) {
+            return LV_FS_RES_UNKNOWN;
+        }
+        file_p->file_d = file_d;
     }
 
     file_p->drv = drv;
-    file_p->file_d = file_d;
 
     if(drv->cache_size) {
         file_p->cache = lv_mem_alloc(sizeof(lv_fs_file_cache_t));
         LV_ASSERT_MALLOC(file_p->cache);
-        lv_memset_00(file_p->cache, sizeof(lv_fs_file_cache_t));
-        file_p->cache->start = UINT32_MAX;  /*Set an invalid range by default*/
-        file_p->cache->end = UINT32_MAX - 1;
+	lv_memset_00(file_p->cache, sizeof(lv_fs_file_cache_t));
+
+        /* If this is a memory-mapped file, then set "cache" to the memory buffer */
+        if(drv->cache_size == LV_FS_CACHE_FROM_BUFFER) {
+            lv_fs_path_ex_t * path_ex = (lv_fs_path_ex_t *)path;
+            file_p->cache->buffer = (void *)path_ex->buffer;
+            file_p->cache->start = 0;
+            file_p->cache->file_position = 0;
+            file_p->cache->end = path_ex->size;
+        }
+        /*Set an invalid range by default*/
+        else {
+            file_p->cache->start = UINT32_MAX;
+            file_p->cache->end = UINT32_MAX - 1;
+        }
     }
 
     return LV_FS_RES_OK;
+}
+
+void lv_fs_make_path_from_buffer(lv_fs_path_ex_t * path, char letter, const void * buf, uint32_t size)
+{
+    path->path[0] = letter;
+    path->path[1] = ':';
+    path->path[2] = 0;
+    path->buffer = buf;
+    path->size = size;
 }
 
 lv_fs_res_t lv_fs_close(lv_fs_file_t * file_p)
@@ -115,7 +142,8 @@ lv_fs_res_t lv_fs_close(lv_fs_file_t * file_p)
     lv_fs_res_t res = file_p->drv->close_cb(file_p->drv, file_p->file_d);
 
     if(file_p->drv->cache_size && file_p->cache) {
-        if(file_p->cache->buffer) {
+        /* Only free cache if it was pre-allocated (for memory-mapped files it is never allocated) */
+        if(file_p->drv->cache_size != LV_FS_CACHE_FROM_BUFFER && file_p->cache->buffer) {
             lv_mem_free(file_p->cache->buffer);
         }
 
